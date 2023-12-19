@@ -1,6 +1,6 @@
 const acorn = require("acorn");
 const util = require("util");
-const scopeStack = [];
+const { scopeStack } = require("./scope");
 
 function evaluate(node, env) {
   switch (node.type) {
@@ -86,16 +86,15 @@ function evaluateBinaryExpression(node, env) {
 }
 
 function getTopScope(node) {
-  let key = "",
-    subKey = "";
+  let key = "";
   switch (node.type) {
     case "Identifier":
       key = node.name;
       break;
     case "MemberExpression":
-      const { object, property } = node;
+      const { object } = node;
       key = object.name;
-      subKey = property.name;
+      break;
 
     default:
       console.log(
@@ -109,6 +108,12 @@ function getTopScope(node) {
       throw new Error(`Unsupported getTopScope ${node.type}`);
   }
 
+  const scope = scopeStack.findScope(key);
+  return {
+    key,
+    scope,
+  };
+
   for (let i = scopeStack.length - 1; i >= 0; i--) {
     const scope = scopeStack[i];
     if (scope && key in scope) return { key, scope };
@@ -117,10 +122,16 @@ function getTopScope(node) {
   return {};
 }
 
+/**
+ * 处理标识
+ * @param {*} node
+ * @param {*} env
+ * @returns
+ */
 function evaluateIdentifier(node, env) {
-  let { scope } = getTopScope(node);
+  const scope = scopeStack.findScope(node.name);
   if (scope) {
-    return scope[node.name].value;
+    return scope.get(node.name)?.value;
   }
 
   return env[node.name] || node.name;
@@ -155,19 +166,20 @@ function evaluateAssignmentExpression(node, env) {
   switch (operator) {
     case "=":
       let { key, scope } = getTopScope(left);
-      if (scope[key].kind === "const") {
+      const item = scope.get(key);
+      if (item.kind === "const") {
         throw new TypeError("Assignment to constant variable");
       }
-      scope[key].value = evaluate(right, env);
+      item.value = evaluate(right, env);
       break;
     case "+=": {
       let { key, scope } = getTopScope(left);
-      scope[key].value += evaluate(right, env);
+      scope.get(key).value += evaluate(right, env);
       break;
     }
     case "*=": {
       let { key, scope } = getTopScope(left);
-      scope[key].value *= evaluate(right, env);
+      scope.get(key).value *= evaluate(right, env);
       break;
     }
     default:
@@ -183,7 +195,7 @@ function evaluateUpdateExpression(node, env) {
     case "++":
       let { key, scope } = getTopScope(argument);
       if (key && scope) {
-        scope[key].value++;
+        scope.get(key).value++;
       }
       break;
     default:
@@ -216,7 +228,7 @@ function evaluateTryStatement(node, env) {
 function evaluateCallExpression(node, env) {
   const func = evaluate(node.callee, env);
   const callRes = func(...node.arguments.map((arg) => evaluate(arg, env)));
-  const scope = scopeStack.at(-1);
+  const scope = scopeStack.topScope();
   // 避免移除其自身
   if (typeof callRes !== "function" && scope && scope.closure) {
     // 闭包执行完毕，移除其所在作用域
@@ -261,7 +273,7 @@ function evaluateReturnStatement(node, env) {
  */
 function evaluateForStatement(node, env) {
   const { init, test, update, body } = node;
-  scopeStack.push({});
+  scopeStack.addScope();
   evaluate(init, env);
   while (evaluate(test, env)) {
     evaluate(body, env);
@@ -276,7 +288,7 @@ function evaluateForStatement(node, env) {
  */
 function evaluateWhileStatement(node, env) {
   const { test, body } = node;
-  scopeStack.push({});
+  scopeStack.addScope();
   while (evaluate(test, env)) {
     evaluate(body, env);
   }
@@ -337,7 +349,7 @@ function evaluateExpressionStatement(node, env) {
  * @returns
  */
 function evaluateBlockStatement(node, env) {
-  scopeStack.push({});
+  scopeStack.addScope();
   let returnVal = undefined;
   for (const item of node.body) {
     returnVal = evaluate(item, env);
@@ -348,7 +360,7 @@ function evaluateBlockStatement(node, env) {
 
   if (typeof returnVal === "function") {
     // 闭包
-    scopeStack.at(-1).closure = true;
+    scopeStack.topScope().closure = true;
   } else {
     scopeStack.pop();
   }
@@ -368,16 +380,17 @@ function evaluateVariableDeclaration(node, env) {
 }
 
 function evaluateVariableDeclarator(node, env) {
-  const topScope = scopeStack.at(-1);
+  const topScope = scopeStack.topScope();
   const { id, init } = node;
-  topScope[evaluate(id, env)] = {
+  topScope.add({
     kind: createVariableKind,
+    key: evaluate(id, env),
     value: node.init ? evaluate(init, env) : undefined,
-  };
+  });
 }
 
 function customerEval(code, env = {}) {
-  scopeStack.push(env);
+  scopeStack.addScope(false, env);
   const node = acorn.parse(code, {
     ecmaVersion: 6,
   });
@@ -387,9 +400,9 @@ function customerEval(code, env = {}) {
   return result;
 }
 
-const s =
-  // "(() => { let a = 1; var b = 2; (() => { a = 2; b = 3; })(); return { a, b }; })()";
-  "((() => { var n = 55; return () => { for (let i = 0; i < 10; i++) { n += i } return n } })())()";
-const result = customerEval(s);
-console.log(result, scopeStack);
+// const s =
+//   // "(() => { let a = 1; var b = 2; (() => { a = 2; b = 3; })(); return { a, b }; })()";
+//   "((() => { var n = 55; return () => { for (let i = 0; i < 10; i++) { n += i } return n } })())()";
+// const result = customerEval(s);
+// console.log(result, scopeStack);
 module.exports = customerEval;
