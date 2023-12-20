@@ -82,9 +82,12 @@ class Scope {
     if (item) {
       if (subKey.length) {
         subKey.reduce((prev, sk, index) => {
-          return index === subKey.length ? (prev[sk] = newVal) : prev[sk];
-        }, item);
+          return index === subKey.length - 1 ? (prev[sk] = newVal) : prev[sk];
+        }, item.value);
       } else {
+        if (item.kind === "const") {
+          throw new TypeError("Assignment to constant variable");
+        }
         item.value = newVal;
       }
     }
@@ -152,6 +155,7 @@ class scopeStack {
   static addScope(closure, init = []) {
     const scope = new Scope(closure, init);
     this.stack.push(scope);
+    console.log("addScope:", this.stack.length);
     return scope;
   }
 
@@ -160,7 +164,9 @@ class scopeStack {
    * @returns
    */
   static pop() {
-    return this.stack.pop();
+    const p = this.stack.pop();
+    console.log("popScope:", this.stack.length);
+    return p;
   }
 
   /**

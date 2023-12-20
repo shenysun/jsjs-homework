@@ -1,6 +1,7 @@
 const acorn = require("acorn");
-const util = require("util");
+const { inspect } = require("util");
 const { scopeStack } = require("./scope");
+const { hasReturn } = require("../../common/utils");
 
 function evaluate(node, env) {
   switch (node.type) {
@@ -48,6 +49,10 @@ function evaluate(node, env) {
       return evaluateUpdateExpression(node, env);
     case "TryStatement":
       return evaluateTryStatement(node, env);
+    case "ThrowStatement":
+      return evaluateThrowStatement(node, env);
+    case "CatchClause":
+      return evaluateCatchClause(node, env);
     default:
       throw new Error(
         `Unsupported Syntax ${node.type} at Location ${node.start}:${node.end}`
@@ -85,41 +90,23 @@ function evaluateBinaryExpression(node, env) {
   }
 }
 
-function getTopScope(node) {
-  let key = "";
+function getKeyList(node) {
+  let keyList = [];
   switch (node.type) {
     case "Identifier":
-      key = node.name;
+      keyList = [node.name];
       break;
     case "MemberExpression":
-      const { object } = node;
-      key = object.name;
+      const { object, property } = node;
+      const keys = getKeyList(object);
+      const subKeys = getKeyList(property);
+      keyList = keys.concat(subKeys);
       break;
-
     default:
-      console.log(
-        "ssss:",
-        util.inspect(scopeStack, {
-          showHidden: false,
-          depth: null,
-          colors: true,
-        })
-      );
-      throw new Error(`Unsupported getTopScope ${node.type}`);
+      throw new Error(`Unsupported getKeyList ${node.type}`);
   }
 
-  const scope = scopeStack.findScope(key);
-  return {
-    key,
-    scope,
-  };
-
-  for (let i = scopeStack.length - 1; i >= 0; i--) {
-    const scope = scopeStack[i];
-    if (scope && key in scope) return { key, scope };
-  }
-
-  return {};
+  return keyList;
 }
 
 /**
@@ -163,23 +150,20 @@ function evaluateLogicalExpression(node, env) {
  */
 function evaluateAssignmentExpression(node, env) {
   const { left, right, operator } = node;
+  const keyList = getKeyList(left);
+  const key = keyList.shift();
+  const scope = scopeStack.findScope(key);
+  const oldVal = scope.get(key).value;
   switch (operator) {
     case "=":
-      let { key, scope } = getTopScope(left);
-      const item = scope.get(key);
-      if (item.kind === "const") {
-        throw new TypeError("Assignment to constant variable");
-      }
-      item.value = evaluate(right, env);
+      scope.set(key, evaluate(right, env), keyList);
       break;
     case "+=": {
-      let { key, scope } = getTopScope(left);
-      scope.get(key).value += evaluate(right, env);
+      scope.set(key, oldVal + evaluate(right, env), keyList);
       break;
     }
     case "*=": {
-      let { key, scope } = getTopScope(left);
-      scope.get(key).value *= evaluate(right, env);
+      scope.set(key, oldVal * evaluate(right, env), keyList);
       break;
     }
     default:
@@ -191,12 +175,13 @@ function evaluateAssignmentExpression(node, env) {
 
 function evaluateUpdateExpression(node, env) {
   const { argument, operator } = node;
+  const keyList = getKeyList(argument);
+  const key = keyList.shift();
+  const scope = scopeStack.findScope(key);
+  const oldVal = scope.get(key).value;
   switch (operator) {
     case "++":
-      let { key, scope } = getTopScope(argument);
-      if (key && scope) {
-        scope.get(key).value++;
-      }
+      scope.set(key, oldVal + 1, keyList);
       break;
     default:
       throw new Error(`Unsupported Operator ${operator}`);
@@ -204,18 +189,58 @@ function evaluateUpdateExpression(node, env) {
 }
 
 /**
- *
+ * 解析 try
  * @param {*} node
  * @param {*} env
  */
 function evaluateTryStatement(node, env) {
   const { block, handler, finalizer } = node;
   try {
-    evaluate(block, env);
+    if (block) {
+      const tryRes = evaluate(block, env);
+      if (hasReturn(tryRes, block)) {
+        return tryRes;
+      }
+    }
   } catch (error) {
-    handler && evaluate(handler, env);
+    // 创建作用域
+    if (handler) {
+      const scope = scopeStack.addScope();
+      scope.add({
+        kind: "var",
+        key: handler.param.name,
+        value: error,
+      });
+      const catchRes = evaluate(handler, env);
+      scopeStack.pop();
+      if (hasReturn(catchRes, handler)) {
+        return catchRes;
+      }
+    }
   } finally {
-    finalizer && evaluate(finalizer, env);
+    if (finalizer) {
+      const finalRes = evaluate(finalizer, env);
+      if (hasReturn(finalRes)) {
+        return finalRes;
+      }
+    }
+  }
+}
+
+function evaluateThrowStatement(node, env) {
+  throw evaluate(node.argument, env);
+}
+
+/**
+ * 解析 catch
+ * @param {*} node
+ * @param {*} env
+ */
+function evaluateCatchClause(node, env) {
+  const { body } = node;
+  const returnRes = evaluate(body, env);
+  if (returnRes) {
+    return returnRes;
   }
 }
 
@@ -333,13 +358,7 @@ function evaluateProgram(node, env) {
 }
 
 function evaluateExpressionStatement(node, env) {
-  const expressionRes = evaluate(node.expression, env);
-  if (
-    expressionRes !== undefined ||
-    node.expression.type === "ReturnStatement"
-  ) {
-    return expressionRes;
-  }
+  return evaluate(node.expression, env);
 }
 
 /**
@@ -353,20 +372,20 @@ function evaluateBlockStatement(node, env) {
   let returnVal = undefined;
   for (const item of node.body) {
     returnVal = evaluate(item, env);
-    if (returnVal !== undefined || item.type === "ReturnStatement") {
+    if (hasReturn(returnVal)) {
       break;
     }
   }
 
   if (typeof returnVal === "function") {
     // 闭包
+    console.log("闭包？？？");
     scopeStack.topScope().closure = true;
   } else {
     scopeStack.pop();
   }
-  if (returnVal !== undefined) {
-    return returnVal;
-  }
+
+  return returnVal;
 }
 
 let createVariableKind;
@@ -397,12 +416,29 @@ function customerEval(code, env = {}) {
 
   let result = evaluate(node, env);
   scopeStack.pop();
+  console.log("scopeStack:", inspect(scopeStack, { depth: 10 }));
   return result;
 }
 
-// const s =
-//   // "(() => { let a = 1; var b = 2; (() => { a = 2; b = 3; })(); return { a, b }; })()";
-//   "((() => { var n = 55; return () => { for (let i = 0; i < 10; i++) { n += i } return n } })())()";
-// const result = customerEval(s);
-// console.log(result, scopeStack);
+const code = `(() => {
+  const obj = {
+    runTry: false,
+    runError: false,
+    runFinally: false,
+    errorMsg: null,
+  }
+  try {
+    obj.runTry = true
+    throw 'wow'
+  } catch (err) {
+    obj.errorMsg = err
+    obj.runError = true
+    return obj
+  } finally {
+    obj.runFinally = true
+  }
+})()`;
+
+customerEval(code);
+
 module.exports = customerEval;
