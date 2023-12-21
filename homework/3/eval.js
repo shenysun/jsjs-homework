@@ -2,6 +2,7 @@ const acorn = require("acorn");
 const { inspect } = require("util");
 const { scopeStack } = require("./scope");
 const { hasReturn } = require("../../common/utils");
+const { FlowStatement } = require("./flow-statement");
 
 function evaluate(node, env) {
   switch (node.type) {
@@ -53,6 +54,14 @@ function evaluate(node, env) {
       return evaluateThrowStatement(node, env);
     case "CatchClause":
       return evaluateCatchClause(node, env);
+    case "FunctionExpression":
+      return evaluateFunctionExpression(node, env);
+    case "SwitchStatement":
+      return evaluateSwitchStatement(node, env);
+    case "ContinueStatement":
+      return evaluateContinueStatement(node, env);
+    case "MemberExpression":
+      return evaluateMemberExpression(node, env);
     default:
       throw new Error(
         `Unsupported Syntax ${node.type} at Location ${node.start}:${node.end}`
@@ -251,8 +260,15 @@ function evaluateCatchClause(node, env) {
  * @returns
  */
 function evaluateCallExpression(node, env) {
+  let applyObj = null;
+  if (node.callee.type === "MemberExpression") {
+    applyObj = evaluate(node.callee.object);
+  }
   const func = evaluate(node.callee, env);
-  const callRes = func(...node.arguments.map((arg) => evaluate(arg, env)));
+  const callRes = func.call(
+    applyObj,
+    ...node.arguments.map((arg) => evaluate(arg, env))
+  );
   const scope = scopeStack.topScope();
   // 避免移除其自身
   if (typeof callRes !== "function" && scope && scope.closure) {
@@ -260,6 +276,37 @@ function evaluateCallExpression(node, env) {
     scopeStack.pop();
   }
   return callRes;
+}
+
+/**
+ * 定义 function
+ */
+function evaluateFunctionExpression(node, env) {
+  const { id, params, body } = node;
+  const idValue = getKeyList(id).pop();
+  const func = function (...args) {
+    const scope = scopeStack.addScope();
+    for (let i = 0; i < params.length; i++) {
+      scope.add({
+        kind: "var",
+        key: params[i].name,
+        value: args[i],
+      });
+    }
+
+    const returnVal = evaluate(body, env);
+    scopeStack.pop();
+    return returnVal;
+  };
+
+  const topScope = scopeStack.topScope();
+  topScope.add({
+    kind: "function",
+    key: idValue,
+    value: func,
+  });
+
+  return func;
 }
 
 /**
@@ -277,6 +324,40 @@ function evaluateArrowFunctionExpression(node, env) {
 }
 
 /**
+ * switch 语句
+ */
+function evaluateSwitchStatement(node, env) {
+  const { discriminant, cases } = node;
+  const discriminantVal = evaluate(discriminant, env);
+  for (let i = 0; i < cases.length; i++) {
+    const caseItem = cases[i];
+    const { test, consequent } = caseItem;
+    if (evaluate(test) === discriminantVal) {
+      for (const consequentItem of consequent) {
+        const res = evaluate(consequentItem);
+        if (res) {
+          return res;
+        }
+      }
+    }
+  }
+}
+
+/**
+ * continue 语句
+ * @param {*} node
+ * @param {*} env
+ */
+function evaluateContinueStatement(node, env) {
+  return new FlowStatement("continue");
+}
+
+function evaluateMemberExpression(node, env) {
+  const { object, property } = node;
+  return evaluate(object, env)[evaluate(property, env)];
+}
+
+/**
  * 条件表达式
  * @param {*} node
  * @param {*} env
@@ -290,7 +371,13 @@ function evaluateConditionalExpression(node, env) {
 }
 
 function evaluateReturnStatement(node, env) {
-  return evaluate(node.argument, env);
+  const returnVal = evaluate(node.argument, env);
+  if (typeof returnVal === "function") {
+    // 处理闭包, 函数调用后再销毁作用域
+    scopeStack.topScope().closure = true;
+  }
+
+  return returnVal;
 }
 
 /**
@@ -315,7 +402,18 @@ function evaluateWhileStatement(node, env) {
   const { test, body } = node;
   scopeStack.addScope();
   while (evaluate(test, env)) {
-    evaluate(body, env);
+    const res = evaluate(body, env);
+    if (res && FlowStatement.isFlowStatement(res)) {
+      const type = FlowStatement.getFlowStatement(res);
+      if (type === "continue") {
+        continue;
+      } else if (type === "return") {
+        return;
+      } else if (type === "break") {
+        break;
+      }
+    }
+    console.log("res:", res);
   }
 
   scopeStack.pop();
@@ -368,21 +466,12 @@ function evaluateExpressionStatement(node, env) {
  * @returns
  */
 function evaluateBlockStatement(node, env) {
-  scopeStack.addScope();
   let returnVal = undefined;
   for (const item of node.body) {
     returnVal = evaluate(item, env);
     if (hasReturn(returnVal)) {
       break;
     }
-  }
-
-  if (typeof returnVal === "function") {
-    // 闭包
-    console.log("闭包？？？");
-    scopeStack.topScope().closure = true;
-  } else {
-    scopeStack.pop();
   }
 
   return returnVal;
@@ -409,36 +498,27 @@ function evaluateVariableDeclarator(node, env) {
 }
 
 function customerEval(code, env = {}) {
+  console.log("start:::: code", code);
+  console.log("start:::: env", inspect(scopeStack, { depth: 10 }));
+
   scopeStack.addScope(false, env);
   const node = acorn.parse(code, {
     ecmaVersion: 6,
   });
 
-  let result = evaluate(node, env);
-  scopeStack.pop();
-  console.log("scopeStack:", inspect(scopeStack, { depth: 10 }));
-  return result;
+  try {
+    let result = evaluate(node, env);
+    return result;
+  } catch (error) {
+    throw error;
+  } finally {
+    scopeStack.pop();
+    console.log("scopeStack:", inspect(scopeStack, { depth: 10 }));
+  }
 }
 
-const code = `(() => {
-  const obj = {
-    runTry: false,
-    runError: false,
-    runFinally: false,
-    errorMsg: null,
-  }
-  try {
-    obj.runTry = true
-    throw 'wow'
-  } catch (err) {
-    obj.errorMsg = err
-    obj.runError = true
-    return obj
-  } finally {
-    obj.runFinally = true
-  }
-})()`;
-
-customerEval(code);
+// const code =
+//   '(function t(type) { const result = []; let i = 0; while (i < 5) { i++; switch (type + "") { case "0": continue; }result.push(i); } return result; })(0)';
+// console.log(customerEval(code));
 
 module.exports = customerEval;

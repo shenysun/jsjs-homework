@@ -155,7 +155,6 @@ class scopeStack {
   static addScope(closure, init = []) {
     const scope = new Scope(closure, init);
     this.stack.push(scope);
-    console.log("addScope:", this.stack.length);
     return scope;
   }
 
@@ -164,9 +163,7 @@ class scopeStack {
    * @returns
    */
   static pop() {
-    const p = this.stack.pop();
-    console.log("popScope:", this.stack.length);
-    return p;
+    return this.stack.pop();
   }
 
   /**
