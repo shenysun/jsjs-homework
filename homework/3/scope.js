@@ -1,3 +1,8 @@
+const { FlowStatement } = require("./flow-statement");
+
+/**
+ * @typedef {('break' | 'return' | 'continue')} TypeFlowStatement
+ */
 /**
  * var 定义类型
  * @typedef {('let' | 'const' | 'var' | 'function')} TypeKind
@@ -23,6 +28,10 @@ class Scope {
    * @type {boolean}
    */
   closure; // 闭包
+  /**
+   * @type {FlowStatement}
+   */
+  flowStatement; // 当前作用域流程控制语句
   /**
    * @type {ScopeValueItem[]} stack
    */
@@ -50,6 +59,15 @@ class Scope {
     } else {
       this.stack = [];
     }
+  }
+
+  /**
+   * 设置作用域流程控制语句
+   * @param {TypeFlowStatement} type
+   * @param {*} valueOrLabel
+   */
+  setFlowStatement(type, valueOrLabel) {
+    this.flowStatement = new FlowStatement(type, valueOrLabel);
   }
 
   /**

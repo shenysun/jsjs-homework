@@ -1,8 +1,6 @@
 const acorn = require("acorn");
 const { inspect } = require("util");
 const { scopeStack } = require("./scope");
-const { hasReturn } = require("../../common/utils");
-const { FlowStatement } = require("./flow-statement");
 
 function evaluate(node, env) {
   switch (node.type) {
@@ -206,9 +204,15 @@ function evaluateTryStatement(node, env) {
   const { block, handler, finalizer } = node;
   try {
     if (block) {
-      const tryRes = evaluate(block, env);
-      if (hasReturn(tryRes, block)) {
-        return tryRes;
+      const scope = scopeStack.addScope();
+      evaluate(block, env);
+      scopeStack.pop();
+      const { flowStatement } = scope;
+      if (flowStatement) {
+        const { type, value } = flowStatement;
+        if (type === "return") {
+          return value;
+        }
       }
     }
   } catch (error) {
@@ -220,17 +224,27 @@ function evaluateTryStatement(node, env) {
         key: handler.param.name,
         value: error,
       });
-      const catchRes = evaluate(handler, env);
+      evaluate(handler, env);
       scopeStack.pop();
-      if (hasReturn(catchRes, handler)) {
-        return catchRes;
+      const { flowStatement } = scope;
+      if (flowStatement) {
+        const { type, value } = flowStatement;
+        if (type === "return") {
+          return value;
+        }
       }
     }
   } finally {
     if (finalizer) {
-      const finalRes = evaluate(finalizer, env);
-      if (hasReturn(finalRes)) {
-        return finalRes;
+      const scope = scopeStack.addScope();
+      evaluate(finalizer, env);
+      scopeStack.pop();
+      const { flowStatement } = scope;
+      if (flowStatement) {
+        const { type, value } = flowStatement;
+        if (type === "return") {
+          return value;
+        }
       }
     }
   }
@@ -295,7 +309,9 @@ function evaluateFunctionExpression(node, env) {
     }
 
     const returnVal = evaluate(body, env);
-    scopeStack.pop();
+    if (!scope.closure) {
+      scopeStack.pop();
+    }
     return returnVal;
   };
 
@@ -313,14 +329,25 @@ function evaluateFunctionExpression(node, env) {
  * 箭头函数
  */
 function evaluateArrowFunctionExpression(node, env) {
-  return function (...args) {
-    const localEnv = {};
-    const params = node.params;
+  const { params, body } = node;
+  const func = function (...args) {
+    const scope = scopeStack.addScope();
     for (let i = 0; i < params.length; i++) {
-      localEnv[params[i].name] = args[i];
+      scope.add({
+        kind: "var",
+        key: params[i].name,
+        value: args[i],
+      });
     }
-    return evaluate(node.body, { ...env, ...localEnv });
+
+    const returnVal = evaluate(body, env);
+    if (!scope.closure) {
+      scopeStack.pop();
+    }
+    return returnVal;
   };
+
+  return func;
 }
 
 /**
@@ -334,9 +361,17 @@ function evaluateSwitchStatement(node, env) {
     const { test, consequent } = caseItem;
     if (evaluate(test) === discriminantVal) {
       for (const consequentItem of consequent) {
-        const res = evaluate(consequentItem);
-        if (res) {
-          return res;
+        evaluate(consequentItem);
+        const { flowStatement } = scopeStack.topScope();
+        if (flowStatement) {
+          const { type, value } = flowStatement;
+          if (type === "return") {
+            return value;
+          } else if (type === "continue") {
+            continue;
+          } else if (type === "break") {
+            break;
+          }
         }
       }
     }
@@ -349,7 +384,8 @@ function evaluateSwitchStatement(node, env) {
  * @param {*} env
  */
 function evaluateContinueStatement(node, env) {
-  return new FlowStatement("continue");
+  const topScope = scopeStack.topScope();
+  topScope.setFlowStatement("continue");
 }
 
 function evaluateMemberExpression(node, env) {
@@ -372,11 +408,13 @@ function evaluateConditionalExpression(node, env) {
 
 function evaluateReturnStatement(node, env) {
   const returnVal = evaluate(node.argument, env);
+  const topScope = scopeStack.topScope();
   if (typeof returnVal === "function") {
     // 处理闭包, 函数调用后再销毁作用域
-    scopeStack.topScope().closure = true;
+    topScope.closure = true;
   }
 
+  topScope.setFlowStatement("return", returnVal);
   return returnVal;
 }
 
@@ -402,18 +440,18 @@ function evaluateWhileStatement(node, env) {
   const { test, body } = node;
   scopeStack.addScope();
   while (evaluate(test, env)) {
-    const res = evaluate(body, env);
-    if (res && FlowStatement.isFlowStatement(res)) {
-      const type = FlowStatement.getFlowStatement(res);
+    evaluate(body, env);
+    const { flowStatement } = scopeStack.topScope();
+    if (flowStatement) {
+      const { type, value } = flowStatement;
       if (type === "continue") {
         continue;
       } else if (type === "return") {
-        return;
+        return value;
       } else if (type === "break") {
         break;
       }
     }
-    console.log("res:", res);
   }
 
   scopeStack.pop();
@@ -425,12 +463,12 @@ function evaluateWhileStatement(node, env) {
  * @param {*} env
  */
 function evaluateObjectExpression(node, env) {
-  const res = {};
+  const objValue = {};
   node.properties.forEach((property) => {
-    res[property.key.name] = evaluate(property.value, env);
+    objValue[property.key.name] = evaluate(property.value, env);
   });
 
-  return res;
+  return objValue;
 }
 
 function evaluateArrayExpression(node, env) {
@@ -438,21 +476,21 @@ function evaluateArrayExpression(node, env) {
 }
 
 function evaluateSequenceExpression(node, env) {
-  let res;
+  let returnVal;
   node.expressions.forEach((expression) => {
-    res = evaluate(expression, env);
+    returnVal = evaluate(expression, env);
   });
 
-  return res;
+  return returnVal;
 }
 
 function evaluateProgram(node, env) {
-  let res;
+  let returnVal;
   for (const child of node.body) {
-    res = evaluate(child, env);
+    returnVal = evaluate(child, env);
   }
 
-  return res;
+  return returnVal;
 }
 
 function evaluateExpressionStatement(node, env) {
@@ -469,8 +507,17 @@ function evaluateBlockStatement(node, env) {
   let returnVal = undefined;
   for (const item of node.body) {
     returnVal = evaluate(item, env);
-    if (hasReturn(returnVal)) {
-      break;
+    const { flowStatement } = scopeStack.topScope();
+    if (flowStatement) {
+      const { type, value } = flowStatement;
+      if (type === "return") {
+        return value;
+      } else if (type === "continue") {
+        if (item.type === "SwitchStatement") {
+          break;
+        }
+        continue;
+      }
     }
   }
 
@@ -516,9 +563,5 @@ function customerEval(code, env = {}) {
     console.log("scopeStack:", inspect(scopeStack, { depth: 10 }));
   }
 }
-
-// const code =
-//   '(function t(type) { const result = []; let i = 0; while (i < 5) { i++; switch (type + "") { case "0": continue; }result.push(i); } return result; })(0)';
-// console.log(customerEval(code));
 
 module.exports = customerEval;
