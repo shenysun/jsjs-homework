@@ -33,9 +33,15 @@ class Scope {
    */
   flowStatement; // 当前作用域流程控制语句
   /**
+   * 作用域定义栈
    * @type {ScopeValueItem[]} stack
    */
   stack;
+  /**
+   * 作用域标签，用于for label
+   * @type { string | undefined }
+   */
+  label;
 
   /**
    * 创建新的作用域

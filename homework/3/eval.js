@@ -58,8 +58,12 @@ function evaluate(node, env) {
       return evaluateSwitchStatement(node, env);
     case "ContinueStatement":
       return evaluateContinueStatement(node, env);
+    case "BreakStatement":
+      return evaluateBreakStatement(node, env);
     case "MemberExpression":
       return evaluateMemberExpression(node, env);
+    case "LabeledStatement":
+      return evaluateLabeledStatement(node, env);
     default:
       throw new Error(
         `Unsupported Syntax ${node.type} at Location ${node.start}:${node.end}`
@@ -92,6 +96,12 @@ function evaluateBinaryExpression(node, env) {
       return leftValue > rightValue;
     case "<":
       return leftValue < rightValue;
+    case "%":
+      return leftValue % rightValue;
+    case "===":
+      return leftValue === rightValue;
+    case "==":
+      return leftValue == rightValue;
     default:
       throw new Error(`Unsupported Operator ${operator}`);
   }
@@ -380,17 +390,40 @@ function evaluateSwitchStatement(node, env) {
 
 /**
  * continue 语句
+ */
+function evaluateContinueStatement(node, env) {
+  const labelValue = node.label ? evaluate(node.label, env) : undefined;
+  const topScope = scopeStack.topScope();
+  topScope.setFlowStatement("continue", labelValue);
+}
+
+/**
+ * break 语句
  * @param {*} node
  * @param {*} env
  */
-function evaluateContinueStatement(node, env) {
+function evaluateBreakStatement(node, env) {
+  const labelValue = node.label ? evaluate(node.label, env) : undefined;
   const topScope = scopeStack.topScope();
-  topScope.setFlowStatement("continue");
+  console.log("setFlowStatement: break");
+  topScope.setFlowStatement("break", labelValue);
 }
 
+/**
+ * 成员表达式
+ */
 function evaluateMemberExpression(node, env) {
   const { object, property } = node;
   return evaluate(object, env)[evaluate(property, env)];
+}
+
+/**
+ * 标签声明
+ */
+function evaluateLabeledStatement(node, env) {
+  const { label, body } = node;
+  const labelValue = evaluate(label, env);
+  return evaluate(body, env);
 }
 
 /**
@@ -402,8 +435,8 @@ function evaluateConditionalExpression(node, env) {
   // 条件 ? 结果 : 备用
   const { test, consequent, alternate } = node;
   return evaluate(test, env)
-    ? evaluate(consequent, env)
-    : evaluate(alternate, env);
+    ? consequent && evaluate(consequent, env)
+    : alternate && evaluate(alternate, env);
 }
 
 function evaluateReturnStatement(node, env) {
@@ -423,14 +456,33 @@ function evaluateReturnStatement(node, env) {
  */
 function evaluateForStatement(node, env) {
   const { init, test, update, body } = node;
-  scopeStack.addScope();
+  // 使用 let 定义才增加新的作用域
+  const needAddScope =
+    init.type === "VariableDeclaration" && init.kind === "let";
+  if (needAddScope) {
+    scopeStack.addScope();
+  }
   evaluate(init, env);
   while (evaluate(test, env)) {
     evaluate(body, env);
+
+    const { flowStatement } = scopeStack.topScope();
+    if (flowStatement) {
+      const { type, value } = flowStatement;
+      console.log("===== now topScope:", type);
+      if (type === "continue") {
+        if (value) {
+          // label
+          break;
+        }
+      }
+    }
     evaluate(update, env);
   }
 
-  scopeStack.pop();
+  if (needAddScope) {
+    scopeStack.pop();
+  }
 }
 
 /**
@@ -563,5 +615,24 @@ function customerEval(code, env = {}) {
     console.log("scopeStack:", inspect(scopeStack, { depth: 10 }));
   }
 }
+
+(() => {
+  loop1: for (var i = 0; i < 3; i++) {
+    loop2: for (var m = 1; m < 3; m++) {
+      if (m % 2 === 0) {
+        break loop1;
+      }
+      loop3: for (var y = 1; y < 10; y++) {
+        if (y % 5 === 0) {
+          continue loop2;
+        }
+      }
+    }
+  }
+  return { i, m, y };
+})();
+const code =
+  "(() => { loop1: for (var i = 0; i < 3; i++) { loop2: for (var m = 1; m < 3; m++) { if (m % 2 === 0) { break loop1; } loop3: for (var y = 1; y < 10; y++) { if (y % 5 === 0) { continue loop2; } } } } return { i, m, y } })()";
+console.log(customerEval(code));
 
 module.exports = customerEval;
